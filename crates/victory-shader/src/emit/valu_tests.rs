@@ -1048,25 +1048,15 @@ fn try_build_image_store_cs(dmask: u8, d16: bool) -> Result<HostShader, crate::S
 
 #[test]
 fn image_store_partial_dmask_writes_expected_channels() {
-    // Non-contiguous dmask (e.g. 0x5 = x|z) is rejected because DXIL
-    // `textureStore` requires a contiguous mask from channel 0.
-    assert!(matches!(
-        try_build_image_store_cs(0x5, false),
-        Err(crate::ShaderError::Unsupported {
-            what: "an image store of some channels",
-            ..
-        })
-    ));
-
-    // (dmask, d16, input root constants, expected channels written)
-    let cases: &[(u8, bool, [u32; 4], &[f32])] = &[
-        (0x0, false, [1.5f32.to_bits(), 0, 0, 0], &[0.0, 0.0, 0.0, 0.0]),
-        (0x1, false, [1.5f32.to_bits(), 0, 0, 0], &[1.5]),
+    // (dmask, d16, input root constants, expected RGBA texel)
+    let cases: &[(u8, bool, [u32; 4], [f32; 4])] = &[
+        (0x0, false, [1.5f32.to_bits(), 0, 0, 0], [0.0, 0.0, 0.0, 0.0]),
+        (0x1, false, [1.5f32.to_bits(), 0, 0, 0], [1.5, 0.0, 0.0, 0.0]),
         (
             0x3,
             false,
             [1.5f32.to_bits(), (-2.25f32).to_bits(), 0, 0],
-            &[1.5, -2.25],
+            [1.5, -2.25, 0.0, 0.0],
         ),
         (
             0x7,
@@ -1077,12 +1067,36 @@ fn image_store_partial_dmask_writes_expected_channels() {
                 4.0f32.to_bits(),
                 0,
             ],
-            &[1.5, -2.25, 4.0],
+            [1.5, -2.25, 4.0, 0.0],
+        ),
+        // Sparse masks: RDNA2 packs enabled channels consecutively and zeros disabled ones.
+        (
+            0x5,
+            false,
+            [1.5f32.to_bits(), (-2.25f32).to_bits(), 0, 0],
+            [1.5, 0.0, -2.25, 0.0],
+        ),
+        (
+            0x9,
+            false,
+            [1.5f32.to_bits(), 4.0f32.to_bits(), 0, 0],
+            [1.5, 0.0, 0.0, 4.0],
         ),
         // d16: 1.5 (0x3E00) in low half, -2.0 (0xC000) in high half, 4.0 (0x4400) in next VGPR.
-        (0x1, true, [0x0000_3E00, 0, 0, 0], &[1.5]),
-        (0x3, true, [0xC000_3E00, 0, 0, 0], &[1.5, -2.0]),
-        (0x7, true, [0xC000_3E00, 0x0000_4400, 0, 0], &[1.5, -2.0, 4.0]),
+        (0x1, true, [0x0000_3E00, 0, 0, 0], [1.5, 0.0, 0.0, 0.0]),
+        (0x3, true, [0xC000_3E00, 0, 0, 0], [1.5, -2.0, 0.0, 0.0]),
+        (
+            0x7,
+            true,
+            [0xC000_3E00, 0x0000_4400, 0, 0],
+            [1.5, -2.0, 4.0, 0.0],
+        ),
+        (
+            0xD,
+            true,
+            [0xC000_3E00, 0x0000_4400, 0, 0],
+            [1.5, 0.0, -2.0, 4.0],
+        ),
     ];
 
     let shaders: Vec<HostShader> = cases
@@ -1124,13 +1138,14 @@ fn image_store_partial_dmask_writes_expected_channels() {
                     },
                 )
                 .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
-            let got: Vec<f32> = out[0][..want.len()]
-                .iter()
-                .map(|&b| f32::from_bits(b))
-                .collect();
+            let got: [f32; 4] = [
+                f32::from_bits(out[0][0]),
+                f32::from_bits(out[0][1]),
+                f32::from_bits(out[0][2]),
+                f32::from_bits(out[0][3]),
+            ];
             assert_eq!(
-                got.as_slice(),
-                want,
+                got, want,
                 "{label}: image_store dmask={dmask:#x} d16={d16} wrote {got:?}, want {want:?}"
             );
         }

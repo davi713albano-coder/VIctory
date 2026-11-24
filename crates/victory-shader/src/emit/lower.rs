@@ -5733,14 +5733,6 @@ impl<'a> Lower<'a> {
             if *dmask == 0 {
                 return Ok(());
             }
-            // DXIL requires typed UAV `textureStore` to write all four
-            // components (`0xF`); accept contiguous masks from channel 0
-            // (`0x1`, `0x3`, `0x7`, `0xF`) used for 1..=4-channel UAVs and
-            // zero-pad the unused trailing channels.
-            if !matches!(*dmask, 0x1 | 0x3 | 0x7 | 0xF) {
-                return Err("an image store of some channels");
-            }
-            let channels = dmask.count_ones() as usize;
             let iu = self.s.m.undef(self.s.t.i32);
             let mut cs = vec![iu; 3];
             for (k, slot) in cs.iter_mut().enumerate().take(coords) {
@@ -5749,16 +5741,24 @@ impl<'a> Lower<'a> {
             let Operand::Vector { reg, .. } = *data else {
                 return Err("image store data");
             };
+            // RDNA2 packs the channels enabled by `dmask` into consecutive
+            // VGPRs (or 16-bit halves with `d16`) and writes 0 to unselected
+            // channels; DXIL typed UAV `textureStore` always writes all four
+            // channels (`0xF`) and the host format drops channels past its
+            // width.
             let zero = self.s.m.f32(0);
             let mut vals = vec![zero; 4];
-            for (k, slot) in vals.iter_mut().enumerate().take(channels) {
-                let k = k as u8;
+            let mut packed = 0u8;
+            for (ch, slot) in vals.iter_mut().enumerate() {
+                if (*dmask >> ch) & 1 == 0 {
+                    continue;
+                }
                 // d16: two f16 channels per VGPR, low half first.
-                let r = if *d16 { k / 2 } else { k };
+                let r = if *d16 { packed / 2 } else { packed };
                 let v = inst.read(Reg::V(reg + r)).ok_or("image store data")?;
                 *slot = if *d16 {
                     let mut x = self.i32_of(v)?;
-                    if k % 2 == 1 {
+                    if packed % 2 == 1 {
                         let k16 = self.s.m.i32(16);
                         x = self.s.m.bin(self.cur, Bin::LShr, x, k16);
                     }
@@ -5768,6 +5768,7 @@ impl<'a> Lower<'a> {
                 } else {
                     self.float_of(v)?
                 };
+                packed += 1;
             }
             let h = self.handle(site, src, false, props)?;
             let at = self.begin_guarded(guard);
